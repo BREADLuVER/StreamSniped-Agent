@@ -27,6 +27,7 @@ from .scoring import (
 )
 from .selection import deduplicate_and_select, append_sequence_numbers_to_adjacent_titles
 from .title_llm import generate_titles_for_clips
+from .gemini_refiner import refine_clip_boundaries
 
 
 class ClipPipeline:
@@ -176,6 +177,25 @@ class ClipPipeline:
             # Long windup guard
             if long_windup_guard(anchor_center, start, end, self.config):
                 continue
+
+            # --- GEMINI REFINEMENT (Top-Down) ---
+            # If the score is high enough, use Gemini to refine the boundaries
+            # This replaces the heuristic padding with semantic understanding
+            if score >= 4.5:  # Only refine high-quality candidates to save cost/latency
+                try:
+                    r_start, r_end, meta = refine_clip_boundaries(self.docs, start, end, anchor_center)
+                    if meta.get("error"):
+                        print(f"  [Refine] Failed for {format_hms(start)}: {meta['error']}")
+                    elif meta.get("status") == "rejected_by_llm":
+                        print(f"  [Refine] Rejected by LLM: {meta.get('reason')}")
+                        continue # Skip this candidate
+                    else:
+                        print(f"  [Refine] Success: {format_hms(start)}->{format_hms(end)} refined to {format_hms(r_start)}->{format_hms(r_end)}")
+                        start, end = r_start, r_end
+                        # Recalculate score for new window? Optional, but let's trust the LLM for now.
+                except Exception as e:
+                    print(f"  [Refine] Exception: {e}")
+            # ------------------------------------
 
             preview = build_preview_text(self.docs, start, end, limit=160)
             candidates.append(ClipCandidate(

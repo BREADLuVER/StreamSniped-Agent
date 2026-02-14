@@ -28,7 +28,27 @@ from src.config import config
 from src.chat_utils import chat_utils
 from src.downloader import downloader
 from storage import StorageManager
-from src.transcription.faster_whisper_client import transcribe_audio_file
+from src.transcription.faster_whisper_client import transcribe_audio_file as transcribe_whisper
+from src.transcription.gemini_client import transcribe_audio_file as transcribe_gemini
+
+def transcribe_audio_file(audio_path: Path) -> Dict:
+    """Dispatches transcription to the configured provider."""
+    provider = os.getenv("TRANSCRIPTION_PROVIDER", "gemini").lower()
+    
+    # Check if Gemini API key is available, fallback to whisper if not
+    if provider == "gemini":
+        if not (os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")):
+            print("[WARN] Gemini API key not found, falling back to faster-whisper")
+            provider = "faster-whisper"
+
+    if provider == "gemini":
+        try:
+            return transcribe_gemini(audio_path)
+        except Exception as e:
+            print(f"[ERROR] Gemini transcription failed: {e}, falling back to faster-whisper")
+            return transcribe_whisper(audio_path)
+    else:
+        return transcribe_whisper(audio_path)
 from utils.chapter_merge import merge_short_chapters
 
 # Ensure project env is loaded (including config/streamsniped.env with ASSEMBLYAI_API_KEY)
@@ -1605,6 +1625,33 @@ def main():
                 adjusted_segment['end'] += chunk['start_time']
                 
                 combined_segments.append(adjusted_segment)
+
+        # Merge short segments to improve chat context capture
+        # Gemini tends to be very granular; we want ~5-10s segments for better chat density
+        merged_combined_segments = []
+        if combined_segments:
+            # Sort by start time to be safe
+            combined_segments.sort(key=lambda x: x['start'])
+            
+            current_seg = combined_segments[0]
+            
+            for next_seg in combined_segments[1:]:
+                # Logic: Merge if current segment is short (< 7s) AND gap is small (< 2s)
+                # This creates segments of roughly 7s+ duration unless there's a long silence
+                duration = current_seg['end'] - current_seg['start']
+                gap = next_seg['start'] - current_seg['end']
+                
+                if duration < 7.0 and gap < 2.0:
+                    # Merge
+                    current_seg['end'] = next_seg['end']
+                    current_seg['text'] = (current_seg['text'].strip() + " " + next_seg['text'].strip()).strip()
+                else:
+                    merged_combined_segments.append(current_seg)
+                    current_seg = next_seg
+            merged_combined_segments.append(current_seg)
+            
+            print(f"Merged {len(combined_segments)} raw segments into {len(merged_combined_segments)} narrative blocks")
+            combined_segments = merged_combined_segments
         
         # Create narrative segments from combined transcript
         narrative_segments = []

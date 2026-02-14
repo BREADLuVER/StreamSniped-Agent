@@ -341,27 +341,49 @@ def load_burst_data_for_chunk(
 # -----------------------------------------------------------------------------
 
 
-def format_transcript_for_prompt(segments: List[Dict], max_chars: int = 200000) -> str:
-    """Format segments into a readable transcript for the prompt."""
+def format_transcript_for_prompt(segments: List[Dict], max_chars: int = 200000, chunk_size_seconds: int = 30) -> str:
+    """Format segments into a readable transcript for the prompt, aggregating text into time blocks."""
     lines = []
     total_chars = 0
+    
+    if not segments:
+        return ""
+
+    current_block_text = []
+    current_block_start = segments[0].get("start_time", 0)
 
     for seg in segments:
         start = seg.get("start_time", 0)
+        end = seg.get("end_time", start)
         transcript = seg.get("transcript", "").strip()
+        
         if not transcript:
             continue
 
-        minutes = int(start // 60)
-        seconds = int(start % 60)
-        line = f"[{minutes:02d}:{seconds:02d}] {transcript}"
+        # If this segment pushes us past the chunk size, flush the buffer
+        if (end - current_block_start) > chunk_size_seconds and current_block_text:
+            # Flush current block
+            block_content = " ".join(current_block_text)
+            line = f"({int(current_block_start)}s) {block_content}"
+            
+            if total_chars + len(line) > max_chars:
+                lines.append("... [transcript truncated for length]")
+                return "\n".join(lines)
+            
+            lines.append(line)
+            total_chars += len(line) + 1
+            
+            # Reset for next block
+            current_block_text = []
+            current_block_start = start
 
-        if total_chars + len(line) > max_chars:
-            lines.append("... [transcript truncated for length]")
-            break
+        current_block_text.append(transcript)
 
+    # Flush remaining text
+    if current_block_text:
+        block_content = " ".join(current_block_text)
+        line = f"({int(current_block_start)}s) {block_content}"
         lines.append(line)
-        total_chars += len(line) + 1
 
     return "\n".join(lines)
 
