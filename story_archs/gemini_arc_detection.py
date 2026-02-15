@@ -123,9 +123,9 @@ We are looking for specific types of content. Use these definitions:
    - Definition: Streamer talking to chat about a specific topic (news, drama, life story, opinion).
    - Climax: The "hottest take", the most controversial statement, or the punchline of the story. *Note: Energy might be lower than gameplay.*
 
-3. **REACTION** (Watching Content)
+3. **REACTION** (High Value Content)
    - Structure: CONTENT_START → REACTION_PEAK → CONTENT_END
-   - Definition: Streamer watching a video, trailer, or reading a tweet/article.
+   - Definition: Streamer watching a video (YouTube, TikTok), trailer, or reading a tweet/article.
    - Climax: The moment of biggest reaction (laughing, shock, pausing to comment).
 
 4. **FILLER** (Ignore)

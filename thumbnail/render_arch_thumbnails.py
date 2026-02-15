@@ -25,6 +25,10 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 from thumbnail.arc_utils import is_just_chatting_arc
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv("config/streamsniped.env")
 
 
 # ========== Data loading (unchanged) ==========
@@ -715,6 +719,118 @@ def _save_cam_box_cache(out_dir: Path, cache: Dict[str, List[int]]) -> None:
         pass
 
 
+# ========== Gemini Thumbnail Refinement ==========
+
+def _refine_thumbnail_with_gemini(
+    thumbnail_path: Path,
+    streamer_name: str,
+    vod_id: str,
+    arc_idx: int,
+    variant: int,
+) -> Optional[Path]:
+    """
+    Send the rendered thumbnail to Gemini 3 Pro Image Preview for refinement.
+    
+    Returns the path to the refined thumbnail, or None if refinement fails or is disabled.
+    """
+    # Check if Gemini refinement is enabled
+    enabled = os.getenv("GEMINI_REFINE_THUMBNAILS", "false").lower() in ["true", "1", "yes"]
+    if not enabled:
+        return None
+    
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        print("GEMINI_API_KEY not found, skipping refinement")
+        return None
+    
+    try:
+        from google import genai
+        from PIL import Image
+        
+        print("  🎨 Refining thumbnail with Gemini 3 Pro Image Preview...")
+        
+        # Initialize Gemini client
+        client = genai.Client(api_key=api_key)
+        
+        # Configure refinement settings
+        aspect_ratio = os.getenv("GEMINI_THUMB_ASPECT_RATIO", "16:9")
+        resolution = os.getenv("GEMINI_THUMB_RESOLUTION", "2K")  # 1K, 2K, or 4K
+        
+        # Build the prompt
+        streamer_display = streamer_name if streamer_name else "this streamer"
+        prompt = f"Generate a better, more eye-catching thumbnail based on the existing thumbnail provided for {streamer_display}. Enhance the colors, contrast, and visual impact to maximize click-through rate. Keep the core composition and text readable. Output aspect ratio: {aspect_ratio}. Resolution: {resolution}."
+        
+        # Use a plain dict for config to avoid SDK version-specific type classes.
+        generate_content_config = {
+            "response_modalities": ["IMAGE", "TEXT"],
+        }
+        
+        # Call Gemini with streaming to capture binary image data (EXACT pattern from AI Studio)
+        out_dir = thumbnail_path.parent
+        refined_path = out_dir / f"arc_{arc_idx:03d}_v{variant}_gemini.jpg"
+        
+        image_saved = False
+        
+        for chunk in client.models.generate_content_stream(
+            model="gemini-3-pro-image-preview",
+            contents=[
+                prompt,
+                Image.open(thumbnail_path),
+            ],
+            config=generate_content_config,
+        ):
+            if not chunk.candidates:
+                continue
+                
+            for candidate in chunk.candidates:
+                if not candidate.content or not candidate.content.parts:
+                    continue
+                    
+                for part in candidate.content.parts:
+                    if part.inline_data and part.inline_data.data:
+                        inline_data = part.inline_data
+                        data_buffer = inline_data.data
+                        
+                        # Save the binary image data
+                        refined_path.write_bytes(data_buffer)
+                        image_saved = True
+                        print(f"  ✨ Refined thumbnail saved: {refined_path.name}")
+                        break
+                
+                if image_saved:
+                    break
+            
+            if image_saved:
+                break
+            
+            # Fallback: try to print text if image not found yet
+            try:
+                text_parts = []
+                if chunk.candidates:
+                    for c in chunk.candidates:
+                        if c.content and c.content.parts:
+                            for p in c.content.parts:
+                                if p.text:
+                                    text_parts.append(p.text)
+                
+                if text_parts:
+                    print(f"  💬 Gemini: {' '.join(text_parts)[:100]}...")
+            except Exception:
+                pass
+        
+        if image_saved:
+            return refined_path
+        else:
+            print("  ⚠️  Gemini returned no image")
+            return None
+        
+    except Exception as e:
+        print(f"  ⚠️  Gemini refinement failed: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
+
+
 # ========== BG frame (your grab, accurate -ss) ==========
 
 def _grab_bg_frame(vod_id: str, arc: Dict, arc_idx: int) -> Optional[Path]:
@@ -794,6 +910,17 @@ def main() -> None:
     from cam_detection.vod_info import TwitchVodInfoProvider
     vod_provider = TwitchVodInfoProvider()
     
+    # Get streamer name for Gemini refinement
+    streamer_name = ""
+    try:
+        from src.config import config
+        sc_path = config.get_ai_data_dir(vod_id) / f"{vod_id}_stream_context.json"
+        if sc_path.exists():
+            context_data = json.loads(sc_path.read_text(encoding="utf-8"))
+            streamer_name = str(context_data.get("streamer") or context_data.get("streamer_name") or "").strip()
+    except Exception:
+        pass
+    
     # Extract all chapter names from arcs
     chapter_names = set()
     for arc in arcs:
@@ -862,6 +989,11 @@ def main() -> None:
                     title_xy=title_xy,
                 )
                 
+                # Optionally refine with Gemini
+                refined_path = None
+                if ok:
+                    refined_path = _refine_thumbnail_with_gemini(out, streamer_name, vod_id, arc_idx, v)
+                
                 sidecar = {
                     "vod_id": vod_id,
                     "arc_index": arc_idx,
@@ -874,6 +1006,7 @@ def main() -> None:
                         "title_xy": title_xy,
                     },
                     "out": str(out),
+                    "refined_out": str(refined_path) if refined_path else None,
                 }
                 (out_dir / f"arc_{arc_idx:03d}_v{v}.json").write_text(json.dumps(sidecar, indent=2), encoding="utf-8")
                 print(("✓" if ok else "X"), f"arc {arc_idx:03d} v{v} (JC) -> {out}")
@@ -944,6 +1077,11 @@ def main() -> None:
                     flip_cam=flip_cam,
                 )
 
+                # Optionally refine with Gemini
+                refined_path = None
+                if ok:
+                    refined_path = _refine_thumbnail_with_gemini(out, streamer_name, vod_id, arc_idx, v)
+                
                 sidecar = {
                     "vod_id": vod_id,
                     "arc_index": arc_idx,
@@ -960,6 +1098,7 @@ def main() -> None:
                         "flip_cam": flip_cam,
                     },
                     "out": str(out),
+                    "refined_out": str(refined_path) if refined_path else None,
                 }
                 (out_dir / f"arc_{arc_idx:03d}_v{v}.json").write_text(json.dumps(sidecar, indent=2), encoding="utf-8")
                 print(("✓" if ok else "X"), f"arc {arc_idx:03d} v{v} -> {out}")

@@ -414,6 +414,98 @@ def call_gemini_3_flash(
             raise RuntimeError(f"Gemini 3 Flash failed: {e}")
 
 
+def call_gemini_3_flash_vision(
+    prompt: str,
+    images: List[Tuple[str, bytes, str]],
+    max_tokens: int = 700,
+    temperature: float = 0.0,
+    request_tag: Optional[str] = None,
+    json_mode: bool = False,
+) -> str:
+    """Call Gemini 3 Flash Preview with image inputs.
+
+    Returns text output or raises RuntimeError on failure.
+    """
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        raise RuntimeError("GEMINI_API_KEY not found in environment")
+
+    if request_tag and not _quiet():
+        print(f"📨 Gemini 3 Flash vision request: {request_tag}")
+
+    with _llm_slot():
+        try:
+            import io
+            from PIL import Image
+            import google.generativeai as genai
+
+            genai.configure(api_key=api_key)
+            model_name = os.getenv("GEMINI_ARC_MODEL", "gemini-3-flash-preview")
+            model = genai.GenerativeModel(model_name)
+
+            content_parts: list = [prompt]
+            for _, img_bytes, _ in images:
+                content_parts.append(Image.open(io.BytesIO(img_bytes)))
+
+            gen_config = genai.types.GenerationConfig(
+                temperature=float(temperature),
+                max_output_tokens=int(max_tokens),
+            )
+            
+            # Use JSON mode if requested (Gemini 1.5+)
+            if json_mode:
+                try:
+                    gen_config.response_mime_type = "application/json"
+                except Exception:
+                    pass  # Fall back to text mode if not supported
+
+            response = model.generate_content(content_parts, generation_config=gen_config)
+
+            # Try multiple extraction methods
+            txt = ""
+            
+            # Method 1: Direct text attribute
+            try:
+                txt = (getattr(response, "text", "") or "").strip()
+            except Exception as e:
+                if not _quiet():
+                    print(f"  Warning: response.text failed: {e}")
+            
+            # Method 2: Parse candidates/parts
+            if not txt:
+                candidates = getattr(response, "candidates", []) or []
+                parts_text: list[str] = []
+                for cand in candidates:
+                    content = getattr(cand, "content", None)
+                    parts = getattr(content, "parts", []) if content is not None else []
+                    for part in parts:
+                        try:
+                            part_text = str(getattr(part, "text", "") or "").strip()
+                            if part_text:
+                                parts_text.append(part_text)
+                        except Exception:
+                            pass
+                txt = " ".join(parts_text).strip()
+            
+            # Method 3: Debug dump if still empty
+            if not txt and not _quiet():
+                print(f"  Debug: response object type: {type(response)}")
+                print(f"  Debug: response dir: {[x for x in dir(response) if not x.startswith('_')]}")
+                if hasattr(response, "prompt_feedback"):
+                    print(f"  Debug: prompt_feedback: {response.prompt_feedback}")
+
+            if txt:
+                if not _quiet():
+                    print(f"✅ Gemini 3 Flash vision OK ({model_name}), {len(txt)} chars")
+                return txt
+
+            raise RuntimeError("Gemini 3 Flash vision returned empty response")
+        except Exception as e:
+            if not _quiet():
+                print(f"❌ Gemini 3 Flash vision failed: {e}")
+            raise RuntimeError(f"Gemini 3 Flash vision failed: {e}")
+
+
 def call_llm(
     prompt: str,
     max_tokens: int = 500,

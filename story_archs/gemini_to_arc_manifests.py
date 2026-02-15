@@ -96,30 +96,20 @@ def compute_arc_rating(arc: Dict[str, Any]) -> Tuple[float, Dict[str, float]]:
     ) * 100.0
     breakdown["hype"] = round(hype_score, 2)
     
-    # 2. Yap Score (0-100)
-    # --------------------
-    # Formerly "Narrative Score"
-    # Controversy (1-10) -> x10 -> 0-100
-    # Narrative (1-10) -> x10 -> 0-100
-    controversy = float(arc.get("controversy_score", 0)) * 10.0
-    interest = float(arc.get("narrative_score", 0)) * 10.0
+    # 2. Independent Scores: Controversy & Narrative
+    # ----------------------------------------------
+    # Calculate independent scores for Controversy and Narrative (0-100)
+    controversy_rating = float(arc.get("controversy_score", 0)) * 10.0
+    narrative_rating = float(arc.get("narrative_score", 0)) * 10.0
     
-    # Bonus for "drama" keywords in summary
-    keyword_bonus = 0.0
-    summary_lower = arc.get("summary", "").lower()
-    keywords = ["drama", "controversy", "ban", "cheater", "scam", "apology", "response", "opinion", "hated", "failed", "beef", "twitter"]
-    if any(k in summary_lower for k in keywords):
-        keyword_bonus = 15.0
-        
-    # Yap Score is mostly Interest + Controversy
-    yap_score = min(100.0, (controversy * 0.4) + (interest * 0.6) + keyword_bonus)
-    breakdown["yap"] = round(yap_score, 2)
+    breakdown["controversy"] = round(controversy_rating, 2)
+    breakdown["narrative"] = round(narrative_rating, 2)
     
     # TOTAL SCORE
     # -----------
-    # We pick the clip if EITHER score is high.
-    # So the representative rating is just the MAX of the two.
-    total_rating = max(hype_score, yap_score)
+    # We pick the clip if ANY score is high.
+    # So the representative rating is just the MAX of the three independent scores.
+    total_rating = max(hype_score, controversy_rating, narrative_rating)
     
     return round(total_rating, 2), breakdown
 
@@ -146,7 +136,7 @@ def select_best_arcs(
     top_k: int = 0,
     min_rating: float = 0.0,
     min_duration: float = 300.0,
-    max_duration: float = 2400.0,
+    max_duration: float = 7200.0,
 ) -> List[Dict[str, Any]]:
     """
     Select the best arcs based on rating.
@@ -192,7 +182,7 @@ def select_best_arcs(
 def filter_arcs(
     arcs: List[Dict[str, Any]],
     min_duration: float = 300.0,
-    max_duration: float = 2400.0,
+    max_duration: float = 7200.0,
     min_confidence: float = 0.0,
     min_score: float = 0.0,
 ) -> List[Dict[str, Any]]:
@@ -367,7 +357,7 @@ def convert_gemini_to_arc_manifests(
         rating = arc.get("_rating", 0)
         breakdown = arc.get("_rating_breakdown", {})
         print(f"     Arc {arc.get('arc_id'):2d}: {rating:5.1f}/100  "
-              f"[hype:{breakdown.get('hype', 0):4.1f} yap:{breakdown.get('yap', 0):4.1f}]  "
+              f"[hype:{breakdown.get('hype', 0):4.1f} ctv:{breakdown.get('controversy', 0):4.1f} nar:{breakdown.get('narrative', 0):4.1f}]  "
               f"({_format_duration_display(arc.get('duration', 0))}) - {arc.get('arc_type', 'unknown')}")
     
     # Select best arcs
@@ -407,7 +397,7 @@ def main():
     parser.add_argument("--top-k", type=int, default=0, help="Max number of arcs to select (0 = all that pass filters)")
     parser.add_argument("--min-rating", type=float, default=0.0, help="Minimum arc rating 0-100 (default: 0 = no filter)")
     parser.add_argument("--min-duration", type=float, default=300.0, help="Minimum arc duration in seconds (default: 300 = 5 min)")
-    parser.add_argument("--max-duration", type=float, default=2400.0, help="Maximum arc duration in seconds (default: 2400 = 40 min)")
+    parser.add_argument("--max-duration", type=float, default=7200.0, help="Maximum arc duration in seconds (default: 7200 = 2 hours)")
     
     args = parser.parse_args()
     

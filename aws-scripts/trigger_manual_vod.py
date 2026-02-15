@@ -25,13 +25,15 @@ class ManualVODTrigger:
         print(f"   Region: {self.region}")
         print(f"   Queue:  {self.queue_url}")
 
-    def send_to_full_queue(self, vod_id: str, *, force: bool = False) -> bool:
+    def send_to_full_queue(self, vod_id: str, *, force: bool = False, channel: str | None = None) -> bool:
         """Send a minimal message to FULL queue for the given VOD ID.
         If force=True, instruct the orchestrator to run regardless of prior status.
         """
         body = {"vod_id": vod_id, "source": "manual-trigger"}
         if force:
             body["force"] = True
+        if channel:
+            body["channel"] = channel
         try:
             self.sqs_client.send_message(QueueUrl=self.queue_url, MessageBody=json.dumps(body))
             print(" Enqueued to FULL queue successfully")
@@ -43,19 +45,21 @@ class ManualVODTrigger:
             print(f"X Unexpected error: {e}")
             return False
 
-    def trigger_vod_processing(self, vod_id: str, *, force: bool = False) -> bool:
+    def trigger_vod_processing(self, vod_id: str, *, force: bool = False, channel: str | None = None) -> bool:
         print(f"\n🚀 Enqueuing FULL job for VOD: {vod_id}")
         if force:
             print("   Force: enabled (bypass orchestrator duplicate/no-retry checks)")
-        return self.send_to_full_queue(vod_id, force=force)
+        if channel:
+            print(f"   Channel override: {channel}")
+        return self.send_to_full_queue(vod_id, force=force, channel=channel)
 
 def main():
     """Main function to handle command line arguments and trigger processing."""
     
-    # Usage: python trigger_manual_vod.py <VOD_ID> [--queue-url Q] [--region R] [--force]
+    # Usage: python trigger_manual_vod.py <VOD_ID> [--queue-url Q] [--region R] [--force] [--channel C]
     if len(sys.argv) < 2 or "--help" in sys.argv or "-h" in sys.argv:
-        print("Usage: python trigger_manual_vod.py <VOD_ID> [--queue-url FULL_QUEUE_URL] [--region us-east-1] [--force]")
-        print("Example: python trigger_manual_vod.py 2525805114")
+        print("Usage: python trigger_manual_vod.py <VOD_ID> [--queue-url FULL_QUEUE_URL] [--region us-east-1] [--force] [--channel CHANNEL_KEY]")
+        print("Example: python trigger_manual_vod.py 2525805114 --channel disguisedtoast")
         print("Adds a manual job to the FULL SQS queue for local processing.")
         sys.exit(0 if ("--help" in sys.argv or "-h" in sys.argv) else 1)
     force = "--force" in sys.argv
@@ -63,6 +67,8 @@ def main():
     vod_id = sys.argv[1]
     region = os.getenv('AWS_REGION', 'us-east-1')
     queue_url = None
+    channel = None
+
     if "--region" in sys.argv:
         try:
             region = sys.argv[sys.argv.index("--region") + 1]
@@ -73,6 +79,11 @@ def main():
             queue_url = sys.argv[sys.argv.index("--queue-url") + 1]
         except Exception:
             queue_url = None
+    if "--channel" in sys.argv:
+        try:
+            channel = sys.argv[sys.argv.index("--channel") + 1]
+        except Exception:
+            channel = None
     
     # Validate VOD ID format (should be numeric)
     if not vod_id.isdigit():
@@ -86,11 +97,13 @@ def main():
         print(f"   Queue:  {queue_url}")
     if force:
         print("   Force:  enabled")
+    if channel:
+        print(f"   Channel: {channel}")
     
     # Create and run the trigger
     try:
         trigger = ManualVODTrigger(region=region, queue_url=queue_url)
-        success = trigger.trigger_vod_processing(vod_id, force=force)
+        success = trigger.trigger_vod_processing(vod_id, force=force, channel=channel)
         
         if success:
             print("\n🎉 Enqueued successfully. The GPU orchestrator will pick it up from the FULL queue.")

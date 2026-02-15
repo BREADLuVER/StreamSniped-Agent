@@ -193,10 +193,11 @@ class GPUResourceMonitor:
 class JobProcessor:
     """Process individual jobs (clip or render)"""
     
-    def __init__(self, job_type: str, manifest_uri: str, vod_id: str):
+    def __init__(self, job_type: str, manifest_uri: str, vod_id: str, channel: Optional[str] = None):
         self.job_type = job_type
         self.manifest_uri = manifest_uri
         self.vod_id = vod_id
+        self.channel = channel
         self.start_time = None
         self.end_time = None
         self.local_postprocess_enabled = os.getenv('LOCAL_POSTPROCESS', 'false').lower() in ['true', '1', 'yes']
@@ -436,9 +437,11 @@ class JobProcessor:
     def _upload_clips_local(self, vod_id: str, force_public: bool) -> bool:
         """Upload clips to YouTube locally (no remote queue)."""
         upload_cmd = [sys.executable, '-u', 'processing-scripts/upload_clips_to_youtube.py', vod_id]
-        # Resolve channels automatically
+        # Resolve channels automatically or use override
         try:
-            if resolve_channels_for_vod:
+            if self.channel:
+                upload_cmd += ['--channels', self.channel]
+            elif resolve_channels_for_vod:
                 channels = resolve_channels_for_vod(vod_id, content_type='clips')
                 if channels:
                     upload_cmd += ['--channels', ','.join(channels)]
@@ -491,7 +494,9 @@ class JobProcessor:
         """Upload arc videos to YouTube using enhanced metadata with timestamps."""
         cmd = [sys.executable, '-u', 'processing-scripts/auto_youtube_upload_arch.py', vod_id]
         try:
-            if resolve_channels_for_vod:
+            if self.channel:
+                cmd += ['--channels', self.channel]
+            elif resolve_channels_for_vod:
                 channels = resolve_channels_for_vod(vod_id, content_type='arcs')
                 if channels:
                     cmd += ['--channels', ','.join(channels)]
@@ -529,13 +534,13 @@ class JobProcessor:
         Uses dynamic rating system to select only the best arcs.
         """
         top_k = os.getenv('GEMINI_ARC_TOP_K', '10')  # Default: top 10 arcs
-        min_rating = os.getenv('GEMINI_ARC_MIN_RATING', '89')  # Default: rating >= 89/100
+        min_rating = os.getenv('GEMINI_ARC_MIN_RATING', '75')  # Default: rating >= 75/100 (Allows 8/10 narrative scores)
         cmd = [
             sys.executable, '-u', '-m', 'story_archs.gemini_to_arc_manifests', vod_id,
             '--top-k', top_k,
             '--min-rating', min_rating,
             '--min-duration', '300',   # 5 min minimum
-            '--max-duration', '2400',  # 40 min maximum
+            '--max-duration', '7200',  # 2 hours maximum (allows long reaction arcs)
         ]
         logger.info(f"Converting Gemini arcs to manifests: {' '.join(cmd)}")
         return self._run_subprocess(cmd, timeout_seconds=300, step_name='Convert Gemini arcs to manifests')
@@ -943,6 +948,9 @@ class JobProcessor:
                         arch_env['WEBCAM_DET_MAJORITY_K'] = os.getenv('WEBCAM_DET_MAJORITY_K', '3')
                         arch_env['WEBCAM_DET_QUALITY'] = os.getenv('WEBCAM_DET_QUALITY', '1080p')
                         arch_env['SNAP_OFFSETS'] = os.getenv('SNAP_OFFSETS', '-1,-0.5,0,0.5,1,2')
+                        # Enable Gemini 3 Pro thumbnail refinement by default
+                        arch_env['GEMINI_REFINE_THUMBNAILS'] = os.getenv('GEMINI_REFINE_THUMBNAILS', 'true')
+                        arch_env['GEMINI_THUMB_RESOLUTION'] = os.getenv('GEMINI_THUMB_RESOLUTION', '2K')
                     except Exception:
                         pass
 
@@ -1276,13 +1284,17 @@ class GPUOrchestratorDaemon:
                 source = str(body.get('source', '')).lower() if isinstance(body, dict) else ''
             except Exception:
                 source = ''
+            
+            # Extract channel override if present
+            channel = body.get('channel') if isinstance(body, dict) else None
+            
             always_run_manual = is_truthy(os.getenv('ORCH_ALWAYS_RUN_MANUAL'), default=False)
             force_rerun = bool(force_flag or (source == 'manual-trigger' and always_run_manual))
             if not vod_id:
                 logger.error("Invalid full job message format")
                 self.delete_message(self.full_queue_url, message['ReceiptHandle'])
                 return False
-            logger.info(f"[JOB RECEIVED] type=full vod_id={vod_id}")
+            logger.info(f"[JOB RECEIVED] type=full vod_id={vod_id} channel={channel or 'auto'}")
             # Drop duplicates or handle retries policy based on DynamoDB status
             try:
                 existing = self._tracker.get_job(vod_id)
@@ -1318,7 +1330,7 @@ class GPUOrchestratorDaemon:
                 self.delete_message(self.full_queue_url, message['ReceiptHandle'])
                 return False
 
-            job = JobProcessor("full", None, vod_id)
+            job = JobProcessor("full", None, vod_id, channel=channel)
             self.current_job = job
             self.current_queue_url = self.full_queue_url
             self.current_receipt_handle = message['ReceiptHandle']
